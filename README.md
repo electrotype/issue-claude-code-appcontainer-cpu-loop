@@ -2,7 +2,7 @@
 
 ## Environment
 
-- Claude Code 2.1.286 (also seen on 2.1.285), native Windows binary `claude.exe` (Bun 1.4.3, revision eecfd55d)
+- Claude Code 2.1.295 (npm `latest`), also 2.1.286 and 2.1.285, native Windows binary `claude.exe` (Bun 1.4.3, revision eecfd55d, in 2.1.286)
 - Windows 11 Pro 10.0.26200, x64
 - Claude Code started inside a Windows **AppContainer** (a standard Windows sandbox; we run the CLI in one so it cannot read the rest of the user's disk)
 
@@ -24,7 +24,7 @@ Set up a folder the AppContainer may read (Windows lets an AppContainer read onl
 
 ```powershell
 mkdir C:\ccrepro\work, C:\ccrepro\config
-copy acrun.exe, trace-root.js C:\ccrepro\
+copy acrun.exe, trace-root.js, realpath-probe.js C:\ccrepro\
 copy <path to claude.exe> C:\ccrepro\          # e.g. node_modules\@anthropic-ai\claude-code-win32-x64\claude.exe
 icacls C:\ccrepro        /grant "*S-1-15-2-1:(OI)(CI)(RX)"
 icacls C:\ccrepro\work   /grant "*S-1-15-2-1:(OI)(CI)(M)"
@@ -66,9 +66,30 @@ drive-root calls so far: 132992
 drive-root calls so far: 138951
 ```
 
+### The realpath failure on its own
+
+`realpath-probe.js` in this repo prints what each `fs.realpath` variant does in the current process. Run it as a preload, so it runs and exits before Claude Code starts:
+
+```powershell
+cd C:\ccrepro\work
+$env:BUN_OPTIONS = '--preload C:/ccrepro/realpath-probe.js'
+C:\ccrepro\claude.exe                       # outside: all ok
+C:\ccrepro\acrun.exe C:\ccrepro\claude.exe  # inside: every realpath variant fails with EPERM
+```
+
+Output inside the AppContainer:
+
+```
+Bun 1.4.3, cwd C:\ccrepro\work
+statSync(cwd)                ok    directory
+realpathSync(cwd)            FAIL  EPERM EPERM: operation not permitted, lstat 'C:\'
+realpathSync.native(cwd)     FAIL  EPERM EPERM: operation not permitted, realpath 'C:\ccrepro\work'
+promises.realpath(cwd)       FAIL  EPERM EPERM: operation not permitted, lstat 'C:\ccrepro\work'
+```
+
 ## Cause
 
-1. In an AppContainer, `realpath` fails with `EPERM` for **every** path (a Bun / Windows issue, reported separately to Bun: <link to the Bun issue>). In short, Windows' `GetFinalPathNameByHandleW` with DOS volume names needs the volume mount manager, which no AppContainer may open. On top of that, the drive root itself (`C:\`) is not readable by an AppContainer by default.
+1. In an AppContainer, `realpath` fails with `EPERM` for **every** path (Bun lists it as a known limitation in oven-sh/bun#33119; see "The realpath failure on its own" above). In short, Windows' `GetFinalPathNameByHandleW` with DOS volume names needs the volume mount manager, which no AppContainer may open. On top of that, the drive root itself (`C:\`) is not readable by an AppContainer by default.
 2. chokidar `add()` → `_addToNodeFs(path)` stats the path and, for a directory with `followSymlinks` on (the default), calls `fs.promises.realpath`. That throws `EPERM`; `_handleError()` swallows it (the watchers use `ignorePermissionErrors: true`, and `ENOENT` is always swallowed), so `_addToNodeFs` returns the path.
 3. `add()` then does `this.add(dirname(n), basename(...))` for every returned path. **It never checks that `dirname(n) !== n`.** Each parent fails the same way, so the walk climbs to `C:/`. There `dirname("C:/") === "C:/"`, so `add("C:/")` repeats forever (an async loop through Bun's thread pool, which is why several threads are busy).
 
