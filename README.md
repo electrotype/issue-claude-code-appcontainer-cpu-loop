@@ -74,6 +74,8 @@ drive-root calls so far: 138951
 
 Outside an AppContainer the walk stops at the first existing parent, because its `realpath` succeeds. So the bug normally stays hidden. But any of Claude Code's directory watchers triggers it inside the sandbox (settings, keybindings, the project folder waiting for `.claude`, skills...).
 
+The same loop was reported for ImDisk RAM disks in #76608 (closed by the stale bot): there too `GetFinalPathNameByHandleW` fails on every path of the volume, and the watcher spins at the drive root.
+
 ## Suggested fix
 
 - In the bundled chokidar's `add()`, stop climbing when `dirname(n) === n` (the drive root or `/`). One check fixes the infinite loop on every platform. chokidar 5.0.0, the latest on npm as of 2026-10-09, still has this code (`results.forEach((item) => { if (item) this.add(sp.dirname(item), ...) })`). chokidar's `main` branch has a rewritten `add()` without that retry, so a release from there (or a one-line patch to the bundled copy) should fix it.
